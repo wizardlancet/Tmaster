@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Node / dashboard
+node_modules/
+dashboard/dist/
+dashboard/.vite/
+*.log
+
+# Build artifacts bundled into server
+server/app/static/assets/
+server/app/static/index.html
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Runtime
+/run/
+*.sock
+logs/
+
+# tsc -b emits these next to sources; we don't commit them
+dashboard/src/**/*.js
+dashboard/src/**/*.js.map
+dashboard/src/**/*.d.ts

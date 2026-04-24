@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tmaster-agent"
+version = "0.0.1"
+description = "TMaster agent + sidecar + shared common library"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "websockets>=12.0",
+    "structlog>=24.1",
+    "libtmux>=0.37",
+    "aiosqlite>=0.20",
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.3",
+]
+
+[project.scripts]
+tmaster-agent = "tmaster.agent.__main__:main"
+tmaster-sidecar = "tmaster.sidecar.__main__:main"
+tmaster = "tmaster.agent.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tmaster"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

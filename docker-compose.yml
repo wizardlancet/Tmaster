@@ -1,0 +1,35 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    environment:
+      TMASTER_DATA_DIR: /data
+      TMASTER_LISTEN: 0.0.0.0:8000
+      TMASTER_JWT_SECRET_FILE: /run/secrets/jwt_secret
+      # Set on first boot:
+      TMASTER_BOOTSTRAP_USER: ${TMASTER_BOOTSTRAP_USER:-admin}
+      TMASTER_BOOTSTRAP_PASSWORD: ${TMASTER_BOOTSTRAP_PASSWORD:-}
+    volumes:
+      - server_data:/data
+    restart: unless-stopped
+    expose: ["8000"]
+    # In production Caddy terminates TLS; uncomment to expose directly.
+    # ports: ["8000:8000"]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [server]
+
+volumes:
+  server_data:
+  caddy_data:
+  caddy_config:
