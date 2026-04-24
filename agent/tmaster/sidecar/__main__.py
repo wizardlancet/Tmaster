@@ -61,7 +61,9 @@ class Sidecar:
         self._peer_writer: Optional[asyncio.StreamWriter] = None
         self._send_lock = asyncio.Lock()
         self._tmux: Optional[TmuxControl] = None
-        self._tmux_stream_id: Optional[int] = None
+        # Set of agent_stream_ids subscribed to the shared tmux stream.
+        # Allows N dashboards to attach to the same tmux session simultaneously.
+        self._tmux_streams: set[int] = set()
 
     async def run(self) -> None:
         self.socket.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -194,49 +196,68 @@ class Sidecar:
             await self._send(env.reply_error("internal", str(e)))
 
     async def _op_tmux_open(self, env: Envelope) -> None:
-        if self._tmux is not None:
-            await self._send(env.reply_error("conflict", "tmux already open"))
-            return
         sid = int(env.payload.get("stream_id") or 0)
         if not sid:
             await self._send(env.reply_error("bad_request", "stream_id required"))
             return
         cols = int(env.payload.get("cols") or 120)
         rows = int(env.payload.get("rows") or 40)
-        self._tmux_stream_id = sid
 
-        async def _on_output(data: bytes) -> None:
-            await self._send_frame(
-                BinaryFrame(tag=FrameTag.PTY_OUT, stream_id=sid, payload=data)
+        # Start the shared tmux -CC on the first subscriber; subsequent opens
+        # just register a new stream id.
+        if self._tmux is None:
+            async def _on_output(data: bytes) -> None:
+                for s in list(self._tmux_streams):
+                    await self._send_frame(
+                        BinaryFrame(tag=FrameTag.PTY_OUT, stream_id=s, payload=data)
+                    )
+
+            async def _on_event(kind: str, args: list[str]) -> None:
+                if kind == "exit":
+                    for s in list(self._tmux_streams):
+                        await self._send_frame(
+                            BinaryFrame(
+                                tag=FrameTag.STREAM_CLOSE, stream_id=s, payload=bytes([0])
+                            )
+                        )
+                    self._tmux_streams.clear()
+                    return
+                log.debug("tmux event", kind=kind, args=args)
+
+            self._tmux = TmuxControl(
+                session=self.tmux_session,
+                cols=cols,
+                rows=rows,
+                tmux_bin=self.tmux_bin,
+                on_output=_on_output,
+                on_event=_on_event,
             )
+            await self._tmux.start()
+        else:
+            # Resize the existing tmux to the newcomer's viewport. The smallest
+            # viewport among attached clients ends up winning in tmux, which is
+            # what you want when multiple viewers share a session.
+            try:
+                await self._tmux.resize(cols, rows)
+            except Exception:
+                log.exception("resize on additional attach failed")
 
-        async def _on_event(kind: str, args: list[str]) -> None:
-            if kind == "exit":
-                await self._send_frame(
-                    BinaryFrame(tag=FrameTag.STREAM_CLOSE, stream_id=sid, payload=bytes([0]))
-                )
-                return
-            # Later: emit tmux.state events here.
-            log.debug("tmux event", kind=kind, args=args)
-
-        self._tmux = TmuxControl(
-            session=self.tmux_session,
-            cols=cols,
-            rows=rows,
-            tmux_bin=self.tmux_bin,
-            on_output=_on_output,
-            on_event=_on_event,
-        )
-        await self._tmux.start()
+        self._tmux_streams.add(sid)
         await self._send(env.reply(payload={"stream_id": sid}))
-        # Ack the stream is live.
-        await self._send_frame(BinaryFrame(tag=FrameTag.STREAM_OPEN_ACK, stream_id=sid, payload=b""))
+        await self._send_frame(
+            BinaryFrame(tag=FrameTag.STREAM_OPEN_ACK, stream_id=sid, payload=b"")
+        )
 
     async def _op_tmux_close(self, env: Envelope) -> None:
-        if self._tmux is not None:
+        sid = int(env.payload.get("stream_id") or 0)
+        if sid:
+            self._tmux_streams.discard(sid)
+        else:
+            # Legacy: close all
+            self._tmux_streams.clear()
+        if not self._tmux_streams and self._tmux is not None:
             await self._tmux.stop()
             self._tmux = None
-            self._tmux_stream_id = None
         await self._send(env.reply())
 
     async def _op_tmux_resize(self, env: Envelope) -> None:
@@ -250,7 +271,9 @@ class Sidecar:
 
     async def _handle_frame(self, frame: BinaryFrame) -> None:
         if frame.tag == FrameTag.PTY_IN and self._tmux is not None:
-            await self._tmux.send_input(frame.payload)
+            # Any subscribed stream can send input into the shared tmux.
+            if frame.stream_id in self._tmux_streams:
+                await self._tmux.send_input(frame.payload)
         elif frame.tag == FrameTag.PTY_RESIZE and self._tmux is not None:
             from tmaster.common.frames import decode_resize
             cols, rows = decode_resize(frame)
