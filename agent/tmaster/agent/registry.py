@@ -40,15 +40,27 @@ class WorkspaceRecord:
     created_at: int
     updated_at: int
 
-    def to_wire(self) -> dict[str, Any]:
-        return {
+    def to_wire(self, runtime: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        d: dict[str, Any] = {
             "id": self.id,
             "tmux_session_name": self.tmux_session_name,
             "label": self.label,
             "cwd": self.cwd,
             "status": self.status,
             "created_at": self.created_at,
+            "updated_at": self.updated_at,
         }
+        if runtime:
+            # Optional per-list runtime metadata; never persisted.
+            for k in (
+                "current_command",
+                "current_pid",
+                "activity",
+                "last_activity_at",
+            ):
+                if k in runtime:
+                    d[k] = runtime[k]
+        return d
 
 
 class Registry:

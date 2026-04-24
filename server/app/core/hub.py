@@ -233,6 +233,14 @@ class Hub:
                 await self._broadcast_workspaces_to_dashboards()
             return
 
+        # Bulk refresh of an agent's workspace map. Agents emit this on a
+        # low-frequency timer to push runtime state (current_command, activity).
+        if env.scope == Scope.AGENT and env.op == Ops.AGENT_WS_LIST and env.type == MsgType.EVENT:
+            wss = env.payload.get("workspaces") or []
+            conn.workspaces = {w["id"]: w for w in wss if "id" in w}
+            await self._broadcast_workspaces_to_dashboards()
+            return
+
         if env.type == MsgType.RESP:
             origin = self._pending.pop(env.in_reply_to or "", None)
             if origin is None:

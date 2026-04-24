@@ -248,6 +248,44 @@ class Sidecar:
             BinaryFrame(tag=FrameTag.STREAM_OPEN_ACK, stream_id=sid, payload=b"")
         )
 
+        # Fast-attach: push an immediate capture-pane snapshot so the viewer
+        # sees recent scrollback + current screen instantly, without waiting
+        # for tmux -CC to replay via %output. The live stream will continue
+        # to deliver deltas after this; any duplicated bytes are harmless
+        # because xterm just re-renders the same content.
+        try:
+            snap = await self._capture_pane_snapshot()
+            if snap:
+                await self._send_frame(
+                    BinaryFrame(tag=FrameTag.PTY_OUT, stream_id=sid, payload=snap)
+                )
+        except Exception:
+            log.exception("capture-pane snapshot failed")
+
+    async def _capture_pane_snapshot(self) -> bytes:
+        """Return the current pane contents (scrollback + visible) as bytes
+        with escape sequences preserved (``-e``)."""
+        args = [
+            self.tmux_bin,
+            "capture-pane",
+            "-p",
+            "-e",
+            "-J",
+            "-S", "-200",
+            "-t", self.tmux_session,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+        if proc.returncode != 0:
+            return b""
+        # tmux prints with trailing newlines per row; normalise to CRLF so xterm
+        # renders rows correctly (the live -CC stream already uses CRLF).
+        return out.replace(b"\n", b"\r\n")
+
     async def _op_tmux_close(self, env: Envelope) -> None:
         sid = int(env.payload.get("stream_id") or 0)
         if sid:

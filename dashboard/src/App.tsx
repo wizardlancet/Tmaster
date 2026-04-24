@@ -1,8 +1,7 @@
-import { Routes, Route, Navigate, Link, useLocation } from "react-router-dom";
+import { Routes, Route, Navigate, Link, useLocation, useParams } from "react-router-dom";
 import Login from "@/pages/Login";
 import Workspaces from "@/pages/Workspaces";
-import Terminal from "@/pages/Terminal";
-import Files from "@/pages/Files";
+import Workspace from "@/pages/Workspace";
 import { useAuth } from "@/lib/auth";
 
 function RequireAuth({ children }: { children: JSX.Element }) {
@@ -19,14 +18,26 @@ function Nav() {
   return (
     <nav className="flex items-center gap-4 px-4 py-2 bg-slate-900 border-b border-slate-800">
       <Link to="/" className="font-semibold text-sky-400">TMaster</Link>
-      <Link to="/" className="text-slate-300 hover:text-white">Workspaces</Link>
+      <Link to="/" className="text-slate-300 hover:text-white text-sm">
+        Workspaces
+      </Link>
       <div className="ml-auto">
-        <button onClick={logout} className="text-slate-400 hover:text-white text-sm">
+        <button
+          onClick={logout}
+          className="text-slate-400 hover:text-white text-sm"
+        >
           Log out
         </button>
       </div>
     </nav>
   );
+}
+
+// Legacy /terminal/:id and /files/:id redirect to the unified view so old
+// bookmarks and shared links keep working.
+function LegacyRedirect({ tab }: { tab: "terminal" | "files" }) {
+  const { workspaceId } = useParams<{ workspaceId: string }>();
+  return <Navigate to={`/w/${workspaceId}?tab=${tab}`} replace />;
 }
 
 export default function App() {
@@ -45,20 +56,20 @@ export default function App() {
             }
           />
           <Route
-            path="/terminal/:workspaceId"
+            path="/w/:workspaceId"
             element={
               <RequireAuth>
-                <Terminal />
+                <Workspace />
               </RequireAuth>
             }
           />
           <Route
+            path="/terminal/:workspaceId"
+            element={<LegacyRedirect tab="terminal" />}
+          />
+          <Route
             path="/files/:workspaceId"
-            element={
-              <RequireAuth>
-                <Files />
-              </RequireAuth>
-            }
+            element={<LegacyRedirect tab="files" />}
           />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

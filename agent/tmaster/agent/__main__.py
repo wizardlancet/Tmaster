@@ -53,12 +53,16 @@ class Agent:
         self._stop = asyncio.Event()
         # stream_id -> workspace_id (used to route binary frames in both directions)
         self._stream_to_workspace: dict[int, str] = {}
+        # workspace_id -> runtime state (current_command, activity, ...)
+        self._runtime_state: dict[str, dict[str, Any]] = {}
+        self._probe_task: Optional[asyncio.Task[None]] = None
 
     # ---- lifecycle ------------------------------------------------------
 
     async def run(self) -> None:
         await self.registry.connect()
         await self._reconcile_on_start()
+        self._probe_task = asyncio.create_task(self._probe_loop(), name="probe-loop")
 
         backoff = self.settings.reconnect_initial_backoff_s
         while not self._stop.is_set():
@@ -74,6 +78,12 @@ class Agent:
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, self.settings.reconnect_max_backoff_s)
 
+        if self._probe_task is not None:
+            self._probe_task.cancel()
+            try:
+                await self._probe_task
+            except asyncio.CancelledError:
+                pass
         await self.supervisor.stop_all()
         await self.registry.close()
 
@@ -84,10 +94,22 @@ class Agent:
         """Inspect registry entries and clean up anything that's dead."""
         recs = await self.registry.list_all()
         for r in recs:
+            if r.status == "deleted":
+                # Preserve soft-deleted history. Make sure tmux is really gone.
+                if await self.tmux.has_session(r.tmux_session_name):
+                    try:
+                        await self.tmux.kill_session(r.tmux_session_name)
+                    except Exception:
+                        log.exception("kill stale tmux", session=r.tmux_session_name)
+                continue
             alive = await self.tmux.has_session(r.tmux_session_name)
             if not alive:
-                log.info("removing stale workspace", workspace_id=r.id)
-                await self.registry.delete(r.id)
+                log.info("workspace tmux gone, marking deleted", workspace_id=r.id)
+                r.status = "deleted"
+                r.sidecar_pid = None
+                r.sidecar_sock = None
+                r.updated_at = self.registry.now()
+                await self.registry.upsert(r)
                 continue
             # We do not auto-restart sidecars across agent restarts; sidecar
             # will be spawned on demand the next time the server or a
@@ -97,6 +119,70 @@ class Agent:
             r.status = "idle"
             r.updated_at = self.registry.now()
             await self.registry.upsert(r)
+
+    async def _probe_loop(self) -> None:
+        """Periodically refresh runtime state (pane_current_command, activity).
+
+        Results populate `self._runtime_state` which is merged into wire
+        responses. Workspaces whose tmux session disappeared unexpectedly are
+        auto-marked ``deleted`` so the UI reflects reality.
+        """
+        interval = 3.0
+        while not self._stop.is_set():
+            try:
+                recs = await self.registry.list_all()
+            except Exception:
+                log.exception("probe list_all failed")
+                recs = []
+            changed_ids: list[str] = []
+            for r in recs:
+                if r.status == "deleted":
+                    self._runtime_state.pop(r.id, None)
+                    continue
+                info = await self.tmux.probe_session(r.tmux_session_name)
+                if info is None:
+                    # tmux went away — soft-delete.
+                    log.warning("tmux session vanished", workspace_id=r.id)
+                    r.status = "deleted"
+                    r.updated_at = self.registry.now()
+                    await self.registry.upsert(r)
+                    self._runtime_state.pop(r.id, None)
+                    changed_ids.append(r.id)
+                    try:
+                        await self.supervisor.stop(r.id)
+                    except Exception:
+                        pass
+                    continue
+                self._runtime_state[r.id] = info
+            # Broadcast updates for changed sessions so dashboards see the
+            # deleted→history transition immediately.
+            for wid in changed_ids:
+                rec = await self.registry.get(wid)
+                if rec:
+                    await self._emit_workspace_update(rec)
+            # Always push a lightweight refresh of the list so clients see
+            # activity/command deltas without polling.
+            try:
+                if self._ws is not None:
+                    await self._announce_workspaces()
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+
+    def _wire_list(self, recs: list[WorkspaceRecord]) -> list[dict[str, Any]]:
+        return [r.to_wire(runtime=self._runtime_state.get(r.id)) for r in recs]
+
+    async def _announce_workspaces(self) -> None:
+        recs = await self.registry.list_all()
+        evt = Envelope.event(
+            scope=Scope.AGENT,
+            op=Ops.AGENT_WS_LIST,
+            payload={"workspaces": self._wire_list(recs)},
+        )
+        await self._send(evt)
 
     # ---- connection -----------------------------------------------------
 
@@ -144,7 +230,7 @@ class Agent:
                 "hostname": self.settings.machine_name or socket.gethostname(),
                 "tmux_version": await self.tmux.server_version(),
             },
-            "workspaces": [r.to_wire() for r in recs],
+            "workspaces": self._wire_list(recs),
         }
         await ws.send(json.dumps(hello))
         ack_raw = await ws.recv()
@@ -180,6 +266,10 @@ class Agent:
                 if rec is None:
                     if env.type == MsgType.REQ:
                         await self._send(env.reply_error("not_found", "unknown workspace"))
+                    return
+                if rec.status == "deleted":
+                    if env.type == MsgType.REQ:
+                        await self._send(env.reply_error("gone", "workspace is deleted"))
                     return
                 try:
                     h = await self._spawn_sidecar_for(rec)
@@ -223,7 +313,7 @@ class Agent:
             return
         if env.op == Ops.AGENT_WS_LIST and env.type == MsgType.REQ:
             recs = await self.registry.list_all()
-            await self._send(env.reply(payload={"workspaces": [r.to_wire() for r in recs]}))
+            await self._send(env.reply(payload={"workspaces": self._wire_list(recs)}))
             return
         if env.op == Ops.AGENT_WS_CREATE and env.type == MsgType.REQ:
             try:
@@ -232,7 +322,7 @@ class Agent:
                     cwd=env.payload.get("cwd") or str(self.settings.default_workspace_cwd),
                     config=env.payload.get("config"),
                 )
-                await self._send(env.reply(payload={"workspace": rec.to_wire()}))
+                await self._send(env.reply(payload={"workspace": rec.to_wire(runtime=self._runtime_state.get(rec.id))}))
             except Exception as e:
                 log.exception("workspace create failed")
                 await self._send(env.reply_error("internal", str(e)))
@@ -277,12 +367,21 @@ class Agent:
         rec = await self.registry.get(ws_id)
         if rec:
             await self.tmux.kill_session(rec.tmux_session_name)
-        await self.registry.delete(ws_id)
+            # Soft-delete: keep the row so the history stays visible in the
+            # dashboard (collapsed under a "Deleted" section).
+            rec.status = "deleted"
+            rec.sidecar_pid = None
+            rec.sidecar_sock = None
+            rec.updated_at = self.registry.now()
+            await self.registry.upsert(rec)
+        self._runtime_state.pop(ws_id, None)
         # Fire deletion event
         evt = Envelope.event(
             scope=Scope.AGENT,
             op=Ops.AGENT_WS_UPDATE,
-            payload={"workspace": {"id": ws_id, "status": "deleted"}},
+            payload={
+                "workspace": (rec.to_wire() if rec else {"id": ws_id, "status": "deleted"}),
+            },
         )
         await self._send(evt)
 
@@ -290,7 +389,7 @@ class Agent:
         evt = Envelope.event(
             scope=Scope.AGENT,
             op=Ops.AGENT_WS_UPDATE,
-            payload={"workspace": rec.to_wire()},
+            payload={"workspace": rec.to_wire(runtime=self._runtime_state.get(rec.id))},
         )
         await self._send(evt)
 

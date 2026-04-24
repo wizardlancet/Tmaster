@@ -61,3 +61,39 @@ class Tmux:
     async def server_version(self) -> str:
         rc, out, _ = await self._run("-V", check=False)
         return out.strip() if rc == 0 else "unknown"
+
+    async def probe_session(self, name: str) -> Optional[dict[str, str]]:
+        """Return runtime info for a session, or None if the session is gone.
+
+        Uses ``display-message -p`` against the first pane of the active window
+        to capture the foreground command + pid. ``activity`` is derived from
+        whether the command looks like an interactive shell.
+        """
+        rc, out, _ = await self._run(
+            "display-message",
+            "-p",
+            "-t",
+            name,
+            "-F",
+            "#{pane_current_command}\t#{pane_pid}\t#{session_activity}",
+            check=False,
+        )
+        if rc != 0:
+            return None
+        line = out.strip().splitlines()[0] if out.strip() else ""
+        parts = line.split("\t")
+        cmd = parts[0] if len(parts) > 0 else ""
+        pid = parts[1] if len(parts) > 1 else ""
+        activity_ms = parts[2] if len(parts) > 2 else ""
+        shells = {"bash", "zsh", "sh", "fish", "ash", "dash", "ksh", "tcsh", "csh"}
+        activity = "idle" if cmd in shells else "busy"
+        info: dict[str, str] = {
+            "current_command": cmd,
+            "activity": activity,
+        }
+        if pid.isdigit():
+            info["current_pid"] = pid
+        if activity_ms.isdigit():
+            # tmux reports ms; we emit seconds for symmetry with other ts
+            info["last_activity_at"] = str(int(int(activity_ms) / 1000))
+        return info

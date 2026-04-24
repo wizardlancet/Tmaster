@@ -41,6 +41,12 @@ export interface Workspace {
   cwd: string | null;
   status: string;
   created_at?: number;
+  updated_at?: number;
+  // runtime state (populated by the agent's periodic probe)
+  current_command?: string;
+  current_pid?: string;
+  activity?: "idle" | "busy";
+  last_activity_at?: number;
 }
 
 export const api = {

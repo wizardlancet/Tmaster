@@ -1,1 +1,1 @@
-{"root":["./src/App.tsx","./src/main.tsx","./src/lib/api.ts","./src/lib/auth.ts","./src/lib/useWs.ts","./src/lib/ws.ts","./src/pages/Files.tsx","./src/pages/Login.tsx","./src/pages/Terminal.tsx","./src/pages/Workspaces.tsx"],"version":"5.9.3"}
+{"root":["./src/App.tsx","./src/main.tsx","./src/lib/api.ts","./src/lib/auth.ts","./src/lib/useWs.ts","./src/lib/ws.ts","./src/pages/Login.tsx","./src/pages/Workspace.tsx","./src/pages/Workspaces.tsx"],"version":"5.9.3"}
